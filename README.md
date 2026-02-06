@@ -1,3 +1,12 @@
+This fork improves the compression speed significantly by
+- replacing `zlib` with [deflate](https://github.com/dcwatson/deflate).
+- replacing List with Deque.
+- replacing `ThreadPoolExecutor` with `ProcessPoolExecutor`.
+
+Using `thread=5, blocksize=10**7, compresslevel=6`, the amount of time to compress a 2GB NDJSON file is reduced from 6 seconds to 3 seconds.
+
+#
+
 👷👷👷 Maintainers Wanted 👷👷👷 See https://github.com/pgzip/pgzip/issues/37
 
 # pgzip
