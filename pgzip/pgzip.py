@@ -5,7 +5,7 @@ License: MIT LICENSE
 Copyright (c) 2019 Vincent Li
 
 """
-
+from collections import deque
 import builtins
 import io
 import os
@@ -210,7 +210,7 @@ class PgzipFile(GzipFile):
             self.compresslevel = compresslevel
             self.blocksize = blocksize  # use 20M blocksize as default
             self.pool = ThreadPoolExecutor(max_workers=self.thread)
-            self.pool_result = []
+            self.pool_result = deque()
             self.small_buf = io.BytesIO()
             # Add _buffer attribute for Python 3.12+ compatibility with io.TextIOWrapper
             self._buffer = self
@@ -299,8 +299,9 @@ class PgzipFile(GzipFile):
             flushSize = len(self.pool_result)
         else:
             flushSize = len(self.pool_result) - self.thread
-        for i in range(flushSize):
-            cdata = self.pool_result.pop(0).result()
+        for _ in range(flushSize):
+            future = self.pool_result.popleft()
+            cdata = future.result()
             length += self._write_member(cdata)
             # (bodyBytes, resBytes, crc, oriSize) = rlt.get()
             # compressRlt = rlt.get()
@@ -518,7 +519,7 @@ class _MulitGzipReader(_GzipReader):
         self._header_size = 0
         self.max_block_size = max_block_size
         self.thread = thread
-        self._read_pool = []
+        self._read_pool = deque()
         self._pool = ThreadPoolExecutor(max_workers=self.thread)
         self._block_buff = b""
         self._block_buff_pos = 0
@@ -651,7 +652,7 @@ class _MulitGzipReader(_GzipReader):
                 self._block_buff_pos = min(self._block_buff_size, self._block_buff_pos)
                 return self._block_buff[st_pos : self._block_buff_pos]
             if self._read_pool:
-                block_read_rlt = self._read_pool.pop(0).result()
+                block_read_rlt = self._read_pool.popleft().result()
                 self.thread += 1
                 # check decompressed data size
                 if len(block_read_rlt[0]) != block_read_rlt[1]:
