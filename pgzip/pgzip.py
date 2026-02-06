@@ -39,7 +39,7 @@ def open(
     errors=None,
     newline=None,
     thread=None,
-    blocksize=10**8,
+    blocksize=10**7,
 ):
     """Open a gzip-compressed file in binary or text mode.
 
@@ -87,7 +87,7 @@ def open(
     return binary_file
 
 
-def compress(data, compresslevel=9, thread=None, blocksize=10**8):
+def compress(data, compresslevel=9, thread=None, blocksize=10**7):
     """Compress data in one shot and return the compressed string.
     Optional argument is the compression level, in range of 0-9.
     """
@@ -140,7 +140,7 @@ class PgzipFile(GzipFile):
         fileobj=None,
         mtime=None,
         thread=None,
-        blocksize=10**8,
+        blocksize=10**7,
     ):
         """Constructor for the GzipFile class.
 
@@ -510,7 +510,7 @@ class PgzipFile(GzipFile):
 
 
 class _MulitGzipReader(_GzipReader):
-    def __init__(self, fp, thread=4, max_block_size=5 * 10**8):
+    def __init__(self, fp, thread=4, max_block_size=5*10**7):
         super().__init__(fp)
 
         self.memberidx = []  # list of tuple (memberSize, rawTxtSize)
