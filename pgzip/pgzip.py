@@ -12,7 +12,7 @@ import os
 import struct
 import time
 import deflate
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from gzip import (
     FCOMMENT,
     FEXTRA,
@@ -509,7 +509,7 @@ class _MulitGzipReader(_GzipReader):
         self.max_block_size = max_block_size
         self.max_threads = thread
         self.active_threads = 0
-        self._pool = ProcessPoolExecutor(max_workers=self.max_threads)
+        self._pool = ThreadPoolExecutor(max_workers=self.max_threads)
         self._read_pool = deque()
         self._block_buff = b""
         self._block_buff_pos = 0
