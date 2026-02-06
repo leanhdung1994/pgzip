@@ -12,7 +12,7 @@ import os
 import struct
 import time
 import deflate
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 from gzip import (
     FCOMMENT,
     FEXTRA,
@@ -30,6 +30,11 @@ __version__ = "0.3.5"
 
 SID = b"IG"  # Subfield ID of indexed gzip file
 
+def compress_block_proc(args):
+    data_bytes, level = args
+    compressed = deflate.deflate_compress(data_bytes, level)
+    crc = deflate.crc32(data_bytes)
+    return compressed, crc, len(data_bytes)
 
 def open(
     filename,
@@ -209,7 +214,7 @@ class PgzipFile(GzipFile):
             self._write_mtime = mtime
             self.compresslevel = compresslevel
             self.blocksize = blocksize  # use 20M blocksize as default
-            self.pool = ThreadPoolExecutor(max_workers=self.thread)
+            self.pool = ProcessPoolExecutor(max_workers=self.thread)
             self.pool_result = deque()
             self.small_buf = io.BytesIO()
             # Add _buffer attribute for Python 3.12+ compatibility with io.TextIOWrapper
@@ -227,26 +232,6 @@ class PgzipFile(GzipFile):
     def _write_gzip_header(self):
         ## ignored to write original header
         pass
-
-    def _compress_func(self, data, pdata=None):
-        """
-        Compress data using raw DEFLATE (libdeflate).
-        """
-        if pdata:
-            combined = pdata.tobytes() + data.tobytes()
-            compressed = deflate.deflate_compress(
-                combined,
-                self.compresslevel,
-            )
-            crc = deflate.crc32(data, deflate.crc32(pdata))
-            return (b"", compressed, b"", crc, len(combined))
-
-        compressed = deflate.deflate_compress(
-            data.tobytes(),
-            self.compresslevel,
-        )
-        crc = deflate.crc32(data)
-        return (b"", compressed, b"", crc, data.nbytes)
 
     def write(self, data):
         self._check_not_closed()
@@ -279,17 +264,21 @@ class PgzipFile(GzipFile):
         self._flush_pool()
         return length
 
-    def _compress_async(self, data, pdata=None):
-        return self.pool_result.append(
-            self.pool.submit(self._compress_func, data, pdata)
+    def _compress_async(self, data):
+        # Convert memoryview → bytes explicitly
+        data_bytes = data.tobytes()
+        self.pool_result.append(
+            self.pool.submit(
+                compress_block_proc,
+                (data_bytes, self.compresslevel),
+            )
         )
 
     def _compress_block_async(self, data):
         if self.small_buf.tell() != 0:
-            self._compress_async(data, self.small_buf.getbuffer())
+            self._compress_async(self.small_buf.getbuffer())
             self.small_buf = io.BytesIO()
-        else:
-            self._compress_async(data)
+        self._compress_async(data)
 
     def _flush_pool(self, force=False):
         if len(self.pool_result) <= self.thread and not force:
@@ -307,24 +296,24 @@ class PgzipFile(GzipFile):
             # compressRlt = rlt.get()
         return length
 
-    def _write_member(self, cdata):
-        """
-        Write a compressed data as a complete gzip member
-        Input:
-            cdata:
-                compressed data, a tuple of compressed result returned by _compress_func()
-        Return:
-            size of member
-        """
-        size = self._write_member_header(
-            len(cdata[0]) + len(cdata[1]) + len(cdata[2]), cdata[4]
+    def _write_member(self, result):
+        compressed, crc, raw_size = result
+
+        # 1. Write gzip header
+        header_size = self._write_member_header(
+            len(compressed),
+            raw_size,
         )
-        self.fileobj.write(cdata[0])  # buffer data
-        self.fileobj.write(cdata[1])  # body data
-        self.fileobj.write(cdata[2])  # rest data
-        write32u(self.fileobj, cdata[3])  # CRC32
-        write32u(self.fileobj, cdata[4] & 0xFFFFFFFF)  # raw data size in 32bits
-        return size
+
+        # 2. Write compressed data
+        self.fileobj.write(compressed)
+
+        # 3. Write trailer
+        write32u(self.fileobj, crc)
+        write32u(self.fileobj, raw_size & 0xFFFFFFFF)
+
+        return header_size + len(compressed) + 8
+
 
     def _write_member_header(self, compressed_size, raw_size):
         self.fileobj.write(b"\037\213")  # magic header, 2 bytes
@@ -520,7 +509,7 @@ class _MulitGzipReader(_GzipReader):
         self.max_block_size = max_block_size
         self.thread = thread
         self._read_pool = deque()
-        self._pool = ThreadPoolExecutor(max_workers=self.thread)
+        self._pool = ProcessPoolExecutor(max_workers=self.thread)
         self._block_buff = b""
         self._block_buff_pos = 0
         self._block_buff_size = 0
