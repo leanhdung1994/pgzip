@@ -11,7 +11,7 @@ import io
 import os
 import struct
 import time
-import zlib
+import deflate
 from concurrent.futures import ThreadPoolExecutor
 from gzip import (
     FCOMMENT,
@@ -206,9 +206,6 @@ class PgzipFile(GzipFile):
         elif mode.startswith(("w", "a", "x")):
             self.mode = WRITE
             self._init_write(filename)
-            self.compress = zlib.compressobj(
-                compresslevel, zlib.DEFLATED, -zlib.MAX_WBITS, zlib.DEF_MEM_LEVEL, 0
-            )
             self._write_mtime = mtime
             self.compresslevel = compresslevel
             self.blocksize = blocksize  # use 20M blocksize as default
@@ -233,39 +230,23 @@ class PgzipFile(GzipFile):
 
     def _compress_func(self, data, pdata=None):
         """
-        Compress data with zlib deflate algorithm.
-        Input:
-            data: btyes object of input data
-            pdata: exists small buffer data
-        Return:
-            tuple of (Buffered compressed data,
-                      Major compressed data,
-                      Rest data after flush buffer,
-                      CRC32,
-                      Original size)
+        Compress data using raw DEFLATE (libdeflate).
         """
-        cpr = zlib.compressobj(
-            self.compresslevel,
-            zlib.DEFLATED,
-            -zlib.MAX_WBITS,
-            9,  # use memory level 9 > zlib.DEF_MEM_LEVEL (8) for better performance
-            0,
-        )
         if pdata:
-            prefix_bytes = cpr.compress(pdata)
-        body_bytes = cpr.compress(data)
-        rest_bytes = cpr.flush()
-        if pdata:
-            crc = zlib.crc32(data, zlib.crc32(pdata))
-            return (
-                prefix_bytes,
-                body_bytes,
-                rest_bytes,
-                crc,
-                pdata.nbytes + data.nbytes,
+            combined = pdata.tobytes() + data.tobytes()
+            compressed = deflate.deflate_compress(
+                combined,
+                self.compresslevel,
             )
-        crc = zlib.crc32(data)
-        return (b"", body_bytes, rest_bytes, crc, data.nbytes)
+            crc = deflate.crc32(data, deflate.crc32(pdata))
+            return (b"", compressed, b"", crc, len(combined))
+
+        compressed = deflate.deflate_compress(
+            data.tobytes(),
+            self.compresslevel,
+        )
+        crc = deflate.crc32(data)
+        return (b"", compressed, b"", crc, data.nbytes)
 
     def write(self, data):
         self._check_not_closed()
@@ -547,26 +528,11 @@ class _MulitGzipReader(_GzipReader):
         self.block_start_iter = None
 
     def _decompress_func(self, data, rcrc, rsize):
-        """
-        Decompress data and return exact bytes of plain text
-        Input:
-            data: compressed data
-            rcrc: raw crc32
-            rsize: raw data size
-        Return:
-            body_bytes: bytes object of decompressed data
-            rsize: raw data size
-            crc: crc32 calculated by decompressed data
-            rcrc: raw crc32 in compressed file
-        """
-        dpr = zlib.decompressobj(wbits=-zlib.MAX_WBITS)
-        ## FIXME: case when raw data size > 4 GB, rsize is just the mod of 4G
-        ## not a good idea to read all of them in memory
-        body_bytes = dpr.decompress(data, rsize)
-        crc = zlib.crc32(body_bytes)
-        if dpr.unconsumed_tail != b"":
-            body_bytes += dpr.unconsumed_tail
-            crc = zlib.crc32(dpr.unconsumed_tail, crc)
+        body_bytes = deflate.deflate_decompress(
+            data,
+            rsize,
+        )
+        crc = deflate.crc32(body_bytes)
         return (body_bytes, rsize, crc, rcrc)
 
     def _decompress_async(self, data, rcrc, rsize):
@@ -741,7 +707,7 @@ class _MulitGzipReader(_GzipReader):
             self._add_read_data(uncompress)
         else:
             # Python 3.12+ - manually update CRC and stream size
-            self._crc = zlib.crc32(uncompress, self._crc)
+            self._crc = deflate.crc32(uncompress, self._crc)
             self._stream_size = self._stream_size + len(uncompress)
         self._pos += len(uncompress)
         return uncompress
