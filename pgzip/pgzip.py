@@ -507,9 +507,10 @@ class _MulitGzipReader(_GzipReader):
         self._is_IG_member = False
         self._header_size = 0
         self.max_block_size = max_block_size
-        self.thread = thread
+        self.max_threads = thread
+        self.active_threads = 0
+        self._pool = ProcessPoolExecutor(max_workers=self.max_threads)
         self._read_pool = deque()
-        self._pool = ProcessPoolExecutor(max_workers=self.thread)
         self._block_buff = b""
         self._block_buff_pos = 0
         self._block_buff_size = 0
@@ -615,7 +616,7 @@ class _MulitGzipReader(_GzipReader):
                 self._new_member = True
                 self._decompressor = self._decomp_factory(**self._decomp_args)
 
-            if self._new_member and self.thread:
+            if self._new_member and self.active_threads < self.max_threads:
                 # If the _new_member flag is set, we have to
                 # jump to the next member, if there is one.
                 self._init_read()
@@ -631,7 +632,7 @@ class _MulitGzipReader(_GzipReader):
                         self._decompress_async(
                             self._fp.read(cpr_size), *self._read_eof_crc()
                         )
-                        self.thread -= 1
+                        self.active_threads += 1
                         self._new_member = True
                         continue
 
@@ -641,8 +642,11 @@ class _MulitGzipReader(_GzipReader):
                 self._block_buff_pos = min(self._block_buff_size, self._block_buff_pos)
                 return self._block_buff[st_pos : self._block_buff_pos]
             if self._read_pool:
-                block_read_rlt = self._read_pool.popleft().result()
-                self.thread += 1
+                future = self._read_pool.popleft()
+                try:
+                    block_read_rlt = future.result()
+                finally:
+                    self.active_threads -= 1
                 # check decompressed data size
                 if len(block_read_rlt[0]) != block_read_rlt[1]:
                     raise OSError("Incorrect length of data produced")
