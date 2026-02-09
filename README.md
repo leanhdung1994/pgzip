@@ -5,30 +5,30 @@ This fork improves the compression speed significantly by
 
 Using `thread=5, blocksize=10**7, compresslevel=6`, the amount of time to compress a 8.77GB TXT file is reduced by half:
 ````cmd
-======================================================================
-  Running fork: leanhdung1994
-  URL:  https://codeload.github.com/leanhdung1994/pgzip/zip/refs/heads/master
-======================================================================
+  Running fork: leanhdung
+  URL         : https://github.com/leanhdung1994/pgzip/archive/refs/heads/master.zip
+==============================
 Creating virtual environment...
-Installing package from https://codeload.github.com/leanhdung1994/pgzip/zip/refs/heads/master ...
+Installing package from https://github.com/leanhdung1994/pgzip/archive/refs/heads/master.zip ...
 Running tests (compression_test.py) ...
-The compression ratio is 7 %
-Completed in 11.028707027435303 seconds
+Compression completed in 13 seconds
+Compression ratio is 7%
 Removing virtual environment...
-Finished cleanup for leanhdung1994
+Finished cleanup for leanhdung
+==============================
 
 
-======================================================================
   Running fork: timhughes
-  URL:  https://codeload.github.com/pgzip/pgzip/zip/refs/heads/master
-======================================================================
+  URL         : https://github.com/pgzip/pgzip/archive/refs/heads/master.zip
+==============================
 Creating virtual environment...
-Installing package from https://codeload.github.com/pgzip/pgzip/zip/refs/heads/master ...
+Installing package from https://github.com/pgzip/pgzip/archive/refs/heads/master.zip ...
 Running tests (compression_test.py) ...
-The compression ratio is 7 %
-Completed in 22.453954219818115 seconds
+Compression completed in 22 seconds
+Compression ratio is 7%
 Removing virtual environment...
 Finished cleanup for timhughes
+==============================
 ````
 
 #
