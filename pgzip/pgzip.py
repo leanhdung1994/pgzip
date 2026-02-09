@@ -360,55 +360,132 @@ class PgzipFile(GzipFile):
         """
         Index Format:
             0: Start offset
-            1: Block size
-            2: Raw size
-            3: Comment (If exists)
+            1: Block size (member size)
+            2: Raw size (ISIZE)
+            3: Comment (if exists)
+
+        This function parses Indexed-GZIP (IG) members only.
         """
         if self.mode != READ:
             raise OSError("READ mode is required for get_index.")
+
         self.index = []
         raw_pos = self.myfileobj.tell()
         self.myfileobj.seek(0)
-        while True:
-            commentByte = b""
-            self.myfileobj.seek(3, 1)
-            fByte = self.myfileobj.read(1)
-            if not fByte:
-                break
-            (flag,) = struct.unpack("<B", fByte)
-            self.myfileobj.seek(8, 1)
-            extra_flag = self.myfileobj.read(8)
-            if not extra_flag:
-                break
-            sid, _, msize = struct.unpack("<2sHI", extra_flag)
-            if sid != SID:
-                raise OSError("Invaild Indexed GZIP format")
-            if flag & FNAME:
-                while True:
-                    s = self.myfileobj.read(1)
-                    if not s or s == b"\000":
-                        break
-            if flag & FCOMMENT:
-                while True:
-                    s = self.myfileobj.read(1)
-                    if not s or s == b"\000":
-                        break
-                    commentByte += s
-            if not self.index:
-                self.index.append([0, msize, 0, commentByte.decode()])
-            else:
-                self.index.append(
-                    [
-                        self.index[-1][0] + self.index[-1][1],
-                        msize,
-                        0,
-                        commentByte.decode(),
-                    ]
-                )
-            self.myfileobj.seek(self.index[-1][0] + self.index[-1][1] - 4)
-            (isize,) = struct.unpack("<I", self.myfileobj.read(4))
-            self.index[-1][2] = isize
-        self.myfileobj.seek(raw_pos)
+
+        try:
+            while True:
+                member_start = self.myfileobj.tell()
+                comment_bytes = b""
+
+                # --- Magic ---
+                magic = self.myfileobj.read(2)
+                if not magic:
+                    break  # normal EOF
+                if magic != b"\037\213":
+                    raise OSError("Not a gzipped file")
+
+                # --- Compression Method ---
+                method_byte = self.myfileobj.read(1)
+                if len(method_byte) != 1:
+                    raise EOFError("Unexpected EOF while reading compression method")
+                method = method_byte[0]
+                if method != 8:
+                    raise OSError("Unsupported compression method")
+
+                # --- Flags ---
+                flag_byte = self.myfileobj.read(1)
+                if len(flag_byte) != 1:
+                    raise EOFError("Unexpected EOF while reading flags")
+                flag = flag_byte[0]
+
+                # --- MTIME (4) + XFL (1) + OS (1) ---
+                fixed = self.myfileobj.read(6)
+                if len(fixed) != 6:
+                    raise EOFError("Unexpected EOF while reading fixed header fields")
+
+                # --- FEXTRA (required for IG) ---
+                if not (flag & FEXTRA):
+                    raise OSError("Invalid Indexed GZIP format - no FEXTRA")
+
+                xlen_bytes = self.myfileobj.read(2)
+                if len(xlen_bytes) != 2:
+                    raise EOFError("Unexpected EOF while reading XLEN")
+                xlen = struct.unpack("<H", xlen_bytes)[0]
+
+                extra_data = self.myfileobj.read(xlen)
+                if len(extra_data) != xlen:
+                    raise EOFError("Unexpected EOF while reading extra field")
+
+                msize = None
+                pos = 0
+                while pos + 4 <= len(extra_data):
+                    sid = extra_data[pos:pos + 2]
+                    sublen = struct.unpack("<H", extra_data[pos + 2:pos + 4])[0]
+                    pos += 4
+
+                    if pos + sublen > len(extra_data):
+                        raise OSError("Corrupted gzip extra field")
+
+                    if sid == SID:
+                        if sublen != 4:
+                            raise OSError("Invalid IG subfield length")
+                        msize = struct.unpack("<I", extra_data[pos:pos + 4])[0]
+
+                    pos += sublen
+
+                if msize is None:
+                    raise OSError("Invalid Indexed GZIP format - missing IG subfield")
+
+                # --- FNAME ---
+                if flag & FNAME:
+                    while True:
+                        s = self.myfileobj.read(1)
+                        if not s:
+                            raise EOFError("Unexpected EOF while reading filename")
+                        if s == b"\x00":
+                            break
+
+                # --- FCOMMENT ---
+                if flag & FCOMMENT:
+                    while True:
+                        s = self.myfileobj.read(1)
+                        if not s:
+                            raise EOFError("Unexpected EOF while reading comment")
+                        if s == b"\x00":
+                            break
+                        comment_bytes += s
+
+                # --- FHCRC ---
+                if flag & FHCRC:
+                    crc16 = self.myfileobj.read(2)
+                    if len(crc16) != 2:
+                        raise EOFError("Unexpected EOF while reading header CRC")
+
+                # --- Record index entry ---
+                self.index.append([
+                    member_start,
+                    msize,
+                    0,
+                    comment_bytes.decode("latin-1"),
+                ])
+
+                # --- Read ISIZE ---
+                isize_pos = member_start + msize - 4
+                self.myfileobj.seek(isize_pos)
+                isize_bytes = self.myfileobj.read(4)
+                if len(isize_bytes) != 4:
+                    raise EOFError("Unexpected EOF while reading ISIZE")
+
+                isize = struct.unpack("<I", isize_bytes)[0]
+                self.index[-1][2] = isize
+
+                # --- Move to next member ---
+                self.myfileobj.seek(member_start + msize)
+
+        finally:
+            self.myfileobj.seek(raw_pos)
+
         return self.index
 
     def show_index(self):
@@ -537,11 +614,10 @@ class _MultiGzipReader(_GzipReader):
             future = self._pool.submit(
                 self._decompress_wrapper, data, rcrc, rsize
             )
+            self._read_pool.append(future)  # Inside try block
         except Exception:
-            # If submit fails, release semaphore immediately
             self._sem.release()
             raise
-        self._read_pool.append(future)
 
     def _read_exact(self, n):
         """Read exactly *n* bytes from `fp`
@@ -588,7 +664,7 @@ class _MultiGzipReader(_GzipReader):
             
             # Parse subfields (at least 4 bytes needed for SI1+SI2+LEN)
             pos = 0
-            while pos + 4 <= extra_len:
+            while pos + 4 <= len(extra_data):
                 sid = extra_data[pos:pos+2]
                 sublen = struct.unpack("<H", extra_data[pos+2:pos+4])[0]
                 pos += 4
@@ -682,7 +758,6 @@ class _MultiGzipReader(_GzipReader):
             if self._block_buff_pos + size <= self._block_buff_size:
                 st_pos = self._block_buff_pos
                 self._block_buff_pos += size
-                self._block_buff_pos = min(self._block_buff_size, self._block_buff_pos)
                 return self._block_buff[st_pos : self._block_buff_pos]
             
             if self._read_pool:
