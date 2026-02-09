@@ -5,6 +5,8 @@ License: MIT LICENSE
 Copyright (c) 2019 Vincent Li
 
 """
+
+from threading import Semaphore
 from collections import deque
 import builtins
 import io
@@ -506,9 +508,9 @@ class _MultiGzipReader(_GzipReader):
         self._header_size = 0
         self.max_block_size = max_block_size
         self.max_threads = thread
-        self.active_threads = 0
         self._pool = ThreadPoolExecutor(max_workers=self.max_threads)
         self._read_pool = deque()
+        self._sem = Semaphore(self.max_threads)
         self._block_buff = b""
         self._block_buff_pos = 0
         self._block_buff_size = 0
@@ -516,17 +518,16 @@ class _MultiGzipReader(_GzipReader):
         self._raw_fp = fp
         self.block_start_iter = None
 
-    def _decompress_func(self, data, rcrc, rsize):
-        body_bytes = deflate.deflate_decompress(
-            data,
-            rsize,
-        )
-        crc = deflate.crc32(body_bytes)
-        return (body_bytes, rsize, crc, rcrc)
+    def _decompress_wrapper(self, data, rcrc, rsize):
+        try:
+            return self._decompress_func(data, rcrc, rsize)
+        finally:
+            self._sem.release()
 
     def _decompress_async(self, data, rcrc, rsize):
+        self._sem.acquire()
         self._read_pool.append(
-            self._pool.submit(self._decompress_func, data, rcrc, rsize)
+            self._pool.submit(self._decompress_wrapper, data, rcrc, rsize)
         )
 
     def _read_exact(self, n):
@@ -598,7 +599,7 @@ class _MultiGzipReader(_GzipReader):
         # call to decompress() may not return
         # any data. In this case, retry until we get some data or reach EOF.
         while True:
-            if self.block_start_iter and self.thread:
+            if self.block_start_iter:
                 try:
                     self._fp.seek(next(self.block_start_iter))
                 except Exception:
@@ -614,7 +615,7 @@ class _MultiGzipReader(_GzipReader):
                 self._new_member = True
                 self._decompressor = self._decomp_factory(**self._decomp_args)
 
-            if self._new_member and self.active_threads < self.max_threads:
+            if self._new_member:
                 # If the _new_member flag is set, we have to
                 # jump to the next member, if there is one.
                 self._init_read()
@@ -630,7 +631,6 @@ class _MultiGzipReader(_GzipReader):
                         self._decompress_async(
                             self._fp.read(cpr_size), *self._read_eof_crc()
                         )
-                        self.active_threads += 1
                         self._new_member = True
                         continue
 
@@ -641,17 +641,14 @@ class _MultiGzipReader(_GzipReader):
                 return self._block_buff[st_pos : self._block_buff_pos]
             if self._read_pool:
                 future = self._read_pool.popleft()
-                try:
-                    block_read_rlt = future.result()
-                finally:
-                    self.active_threads -= 1
+                block_read_rlt = future.result()
                 # check decompressed data size
                 if len(block_read_rlt[0]) != block_read_rlt[1]:
                     raise OSError("Incorrect length of data produced")
                 # check raw crc32 == decompressed crc32
                 if block_read_rlt[2] != block_read_rlt[3]:
                     raise OSError(
-                        f"CRC check failed {block_read_rlt[3]:s} != {block_read_rlt[2]:s}"
+                        f"CRC check failed {block_read_rlt[3]} != {block_read_rlt[2]}"
                     )
                 self._block_buff = (
                     self._block_buff[self._block_buff_pos :] + block_read_rlt[0]
