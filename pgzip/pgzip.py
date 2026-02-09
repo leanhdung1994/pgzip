@@ -554,29 +554,49 @@ class _MultiGzipReader(_GzipReader):
         return data
 
     def _read_gzip_header(self):
+        # Reset per-member state
+        self._header_size = 0
+        self._is_IG_member = False
         magic = self._fp.read(2)
         if magic == b"":
             return False
-
         if magic != b"\037\213":
             raise OSError("Not a gzipped file (%r)" % magic)
-
-        (method, flag, self._last_mtime) = struct.unpack("<BBIxx", self._read_exact(8))
+        # Fixed 10-byte base header:
+        # ID1 ID2 CM FLG MTIME(4) XFL OS
+        (method, flag, self._last_mtime) = struct.unpack(
+            "<BBIxx", self._read_exact(8)
+        )
         if method != 8:
             raise OSError("Unknown compression method")
-
+        # Base header size = 10 bytes
+        self._header_size = 10
+        
+        # --- FEXTRA ---
         if flag & FEXTRA:
-            # Read & discard the extra field, if present
-            extra_len, sid = struct.unpack("<H2s", self._read_exact(4))
-            if sid == SID:
-                _, msize = struct.unpack("<HI", self._read_exact(extra_len - 2))
-                self.memberidx.append(msize)
-                self._is_IG_member = True
-                # print("block", len(self.memberidx), msize, rsize)
-                self._header_size = 20  # fixed header + FEXTRA
-            else:
-                self._is_IG_member = False
-
+            # Read XLEN
+            extra_len = struct.unpack("<H", self._read_exact(2))[0]
+            self._header_size += 2
+            # Read full extra field
+            extra_data = self._read_exact(extra_len)
+            self._header_size += extra_len
+            
+            # Parse subfields (at least 4 bytes needed for SI1+SI2+LEN)
+            pos = 0
+            while pos + 4 <= len(extra_data):
+                sid = extra_data[pos:pos+2]
+                sublen = struct.unpack("<H", extra_data[pos+2:pos+4])[0]
+                pos += 4
+                
+                if sid == SID and pos + sublen <= len(extra_data):
+                    # Parse indexed gzip subfield
+                    msize = struct.unpack("<I", extra_data[pos:pos+4])[0]
+                    self.memberidx.append(msize)
+                    self._is_IG_member = True
+                
+                pos += sublen
+        
+        # --- FNAME ---
         if flag & FNAME:
             # Read and discard a null-terminated string containing the filename
             while True:
@@ -584,6 +604,8 @@ class _MultiGzipReader(_GzipReader):
                 self._header_size += 1
                 if not s or s == b"\000":
                     break
+        
+        # --- FCOMMENT ---
         if flag & FCOMMENT:
             # Read and discard a null-terminated string containing a comment
             while True:
@@ -591,14 +613,18 @@ class _MultiGzipReader(_GzipReader):
                 self._header_size += 1
                 if not s or s == b"\000":
                     break
+        
+        # --- FHCRC ---
         if flag & FHCRC:
             self._read_exact(2)  # Read & discard the 16-bit header CRC
             self._header_size += 2
+        
         return True
 
     def read(self, size=-1):
         if size < 0:
             return self.readall()
+        
         # size=0 is special because decompress(max_length=0) is not supported
         if not size:
             return b""
