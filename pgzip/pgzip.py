@@ -518,6 +518,14 @@ class _MultiGzipReader(_GzipReader):
         self._raw_fp = fp
         self.block_start_iter = None
 
+    def _decompress_func(self, data, rcrc, rsize):
+        body_bytes = deflate.deflate_decompress(
+            data,
+            rsize,
+        )
+        crc = deflate.crc32(body_bytes)
+        return (body_bytes, rsize, crc, rcrc)
+
     def _decompress_wrapper(self, data, rcrc, rsize):
         try:
             return self._decompress_func(data, rcrc, rsize)
