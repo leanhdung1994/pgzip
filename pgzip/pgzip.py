@@ -201,7 +201,7 @@ class PgzipFile(GzipFile):
         if mode.startswith("r"):
             self.mode = READ
             self.thread = self.thread // 2 or 1
-            self.raw = _MulitGzipReader(
+            self.raw = _MultiGzipReader(
                 fileobj, thread=self.thread, max_block_size=blocksize
             )
             self._buffer = io.BufferedReader(self.raw, blocksize)
@@ -243,14 +243,14 @@ class PgzipFile(GzipFile):
         if self.fileobj is None:
             raise ValueError("write() on closed GzipFile object")
 
-        data = memoryview(data)
-        length = data.nbytes
+        data = bytes(data)
+        length = len(data)
 
         if length == 0:
             return length
         if length >= self.blocksize:
             if length < 2 * self.blocksize:
-                # use sigle thread
+                # submit a single compression block
                 self._compress_block_async(data)
             else:
                 for st in range(0, length, self.blocksize):
@@ -259,24 +259,22 @@ class PgzipFile(GzipFile):
         elif length < self.blocksize:
             self.small_buf.write(data)
             if self.small_buf.tell() >= self.blocksize:
-                self._compress_async(self.small_buf.getbuffer())
+                self._compress_async(self.small_buf.getvalue())
                 self.small_buf = io.BytesIO()
         self._flush_pool()
         return length
 
     def _compress_async(self, data):
-        # Convert memoryview → bytes explicitly
-        data_bytes = data.tobytes()
         self.pool_result.append(
             self.pool.submit(
                 compress_block_proc,
-                (data_bytes, self.compresslevel),
+                (data, self.compresslevel),
             )
         )
 
     def _compress_block_async(self, data):
         if self.small_buf.tell() != 0:
-            self._compress_async(self.small_buf.getbuffer())
+            self._compress_async(self.small_buf.getvalue())
             self.small_buf = io.BytesIO()
         self._compress_async(data)
 
@@ -475,7 +473,7 @@ class PgzipFile(GzipFile):
         try:
             if self.mode == WRITE:
                 if self.small_buf.tell() != 0:
-                    self._compress_async(self.small_buf.getbuffer())
+                    self._compress_async(self.small_buf.getvalue())
                     self.small_buf = io.BytesIO()
                 self._flush_pool(force=True)
             elif self.mode == READ:
@@ -499,7 +497,7 @@ class PgzipFile(GzipFile):
             self.fileobj.flush()
 
 
-class _MulitGzipReader(_GzipReader):
+class _MultiGzipReader(_GzipReader):
     def __init__(self, fp, thread=4, max_block_size=5*10**7):
         super().__init__(fp)
 
