@@ -1,7 +1,7 @@
 This fork improves the compression speed significantly by
 - replacing `zlib` with [deflate](https://github.com/dcwatson/deflate).
 - replacing List with Deque.
-- replacing `ThreadPoolExecutor` with `ProcessPoolExecutor`.
+- replacing `ThreadPoolExecutor` with `ProcessPoolExecutor` for compression.
 
 Using `thread=5, blocksize=10**7, compresslevel=6`, the amount of time to compress a 8.77GB TXT file is reduced by half:
 ````cmd
