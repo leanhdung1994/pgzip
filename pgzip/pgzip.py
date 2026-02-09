@@ -130,12 +130,6 @@ def padded_file_seek(self, off, whence=0):
     self._buffer = None
     return self.file.seek(off, whence)
 
-
-_PaddedFile.seek = (
-    padded_file_seek  # override the seek method to provide whence parameter
-)
-
-
 class PgzipFile(GzipFile):
     """docstring of PgzipFile"""
 
@@ -498,10 +492,16 @@ class PgzipFile(GzipFile):
             self._flush_pool(force=True)
             self.fileobj.flush()
 
+class _SeekablePaddedFile(_PaddedFile):
+    def seek(self, off, whence=0):
+        self._read = None
+        self._buffer = None
+        return self.file.seek(off, whence)
 
 class _MultiGzipReader(_GzipReader):
     def __init__(self, fp, thread=4, max_block_size=5*10**7):
-        super().__init__(fp)
+        padded = _SeekablePaddedFile(fp)
+        super().__init__(padded)
 
         self.memberidx = []  # list of tuple (memberSize, rawTxtSize)
         self._is_IG_member = False
