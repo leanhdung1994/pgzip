@@ -515,7 +515,6 @@ class _MultiGzipReader(_GzipReader):
         self._block_buff_pos = 0
         self._block_buff_size = 0
         self._is_eof = False
-        self._raw_fp = fp
         self.block_start_iter = None
 
     def _decompress_func(self, data, rcrc, rsize):
@@ -534,9 +533,15 @@ class _MultiGzipReader(_GzipReader):
 
     def _decompress_async(self, data, rcrc, rsize):
         self._sem.acquire()
-        self._read_pool.append(
-            self._pool.submit(self._decompress_wrapper, data, rcrc, rsize)
-        )
+        try:
+            future = self._pool.submit(
+                self._decompress_wrapper, data, rcrc, rsize
+            )
+        except Exception:
+            # If submit fails, release semaphore immediately
+            self._sem.release()
+            raise
+        self._read_pool.append(future)
 
     def _read_exact(self, n):
         """Read exactly *n* bytes from `fp`
@@ -583,17 +588,22 @@ class _MultiGzipReader(_GzipReader):
             
             # Parse subfields (at least 4 bytes needed for SI1+SI2+LEN)
             pos = 0
-            while pos + 4 <= len(extra_data):
+            while pos + 4 <= extra_len:
                 sid = extra_data[pos:pos+2]
                 sublen = struct.unpack("<H", extra_data[pos+2:pos+4])[0]
                 pos += 4
-                
-                if sid == SID and pos + sublen <= len(extra_data):
-                    # Parse indexed gzip subfield
+
+                if pos + sublen > extra_len:
+                    raise OSError("Corrupted gzip extra field")
+
+                if sid == SID:
+                    if sublen != 4:
+                        raise OSError("Invalid IG subfield length")
+
                     msize = struct.unpack("<I", extra_data[pos:pos+4])[0]
                     self.memberidx.append(msize)
                     self._is_IG_member = True
-                
+
                 pos += sublen
         
         # --- FNAME ---
@@ -770,3 +780,14 @@ class _MultiGzipReader(_GzipReader):
 
     def clear_block_iter(self):
         self.block_start_iter = None
+
+    def close(self):
+        """
+        Properly shut down thread pool and underlying reader.
+        """
+        try:
+            # Wait for any running decompression tasks
+            self._pool.shutdown(wait=True)
+        finally:
+            # Let parent class clean up buffers and state
+            super().close()
