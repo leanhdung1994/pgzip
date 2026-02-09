@@ -614,6 +614,7 @@ class _MultiGzipReader(_GzipReader):
                     self.clear_block_iter()
                     self._fp.seek(0, 2)
                     continue
+
             if self._decompressor.eof:
                 # Ending case: we've come to the end of a member in the file,
                 # so finish up this member, and read a new gzip header.
@@ -647,30 +648,41 @@ class _MultiGzipReader(_GzipReader):
                 self._block_buff_pos += size
                 self._block_buff_pos = min(self._block_buff_size, self._block_buff_pos)
                 return self._block_buff[st_pos : self._block_buff_pos]
+            
             if self._read_pool:
                 future = self._read_pool.popleft()
                 block_read_rlt = future.result()
-                # check decompressed data size
+
                 if len(block_read_rlt[0]) != block_read_rlt[1]:
                     raise OSError("Incorrect length of data produced")
-                # check raw crc32 == decompressed crc32
+
                 if block_read_rlt[2] != block_read_rlt[3]:
                     raise OSError(
                         f"CRC check failed {block_read_rlt[3]} != {block_read_rlt[2]}"
                     )
-                self._block_buff = (
-                    self._block_buff[self._block_buff_pos :] + block_read_rlt[0]
-                )
+
+                # Preserve unread portion
+                unread = self._block_buff[self._block_buff_pos:]
+                self._block_buff = unread + block_read_rlt[0]
                 self._block_buff_size = len(self._block_buff)
-                self._block_buff_pos = min(size, self._block_buff_size)
-                return self._block_buff[
-                    :size
-                ]  # FIXME: fix issue when size > len(self._block_buff)
+                self._block_buff_pos = 0
+
+                # If still not enough data and not EOF, continue loop
+                if self._block_buff_size < size and not self._is_eof:
+                    continue
+
+                # Return exactly up to requested size
+                end = min(size, self._block_buff_size)
+                result = self._block_buff[:end]
+                self._block_buff_pos = end
+                return result
+            
             if self._block_buff_pos != self._block_buff_size:
                 # still something in self._block_buff
                 st_pos = self._block_buff_pos
                 self._block_buff_pos = self._block_buff_size
                 return self._block_buff[st_pos:]
+            
             if self._is_eof:
                 return b""
 
@@ -686,6 +698,7 @@ class _MultiGzipReader(_GzipReader):
                     # Prepend the already read bytes to the fileobj so they can
                     # be seen by _read_eof() and _read_gzip_header()
                     self._fp.prepend(self._decompressor.unused_data)
+
             # Python 3.12+ - unconsumed_tail was removed, only check unused_data
             elif self._decompressor.unused_data != b"":
                 # Prepend the already read bytes to the fileobj so they can
@@ -694,6 +707,7 @@ class _MultiGzipReader(_GzipReader):
 
             if uncompress != b"":
                 break
+
             if buf == b"":
                 raise EOFError(
                     "Compressed file ended before the end-of-stream marker was reached"
